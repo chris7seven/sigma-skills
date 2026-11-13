@@ -1,0 +1,192 @@
+data_model: 'Model: Sales Operations (Example)'
+data_model_id: 00000000-0000-0000-0000-000000000000
+url: https://app.sigmacomputing.com/example-org/data-model/Model-Sales-Operations-EXAMPLE
+schema_version: 1
+# ---------------------------------------------------------------------------
+# SANITIZED EXAMPLE — fictional "Acme Retail" warehouse.
+# Shows the YAML "as-code" export shape (NOT the JSON API shape). Use it as a
+# translation reference: see SKILL.md "When asked to convert a user's YAML to a
+# working data model". Replace schema/table/column names with your own.
+# ---------------------------------------------------------------------------
+tables:
+# --- SQL element: a date spine joined to a dimension (cross-join pattern) ---
+- page: Sales Operations
+  name: Store/Date
+  element_id: kB-G_AA8Kb
+  source:
+    kind: sql
+    from: silver.crm.dim_store_regions
+    sql: |-
+      select
+          sr.store,
+          sr.region,
+          dt.date,
+          dt.is_sales_day,
+          dt.is_fulfillment_day
+      from silver.crm.dim_store_regions   as sr
+      cross join utility.tools.bi_date_table as dt
+      where dt.date between
+          date_trunc('quarter', current_date) - interval '3 months'
+          and date_trunc('quarter', current_date) + interval '6 months' - interval '1 day'
+  columns:
+  - name: Store
+    id: store
+  - name: Region
+    id: region
+  - name: Is Sales Day
+    id: is_sales_day
+  - name: Is Fulfillment Day
+    id: is_fulfillment_day
+  - name: Date
+    id: date
+# --- SQL element with AS aliases: raw col -> display name mapping ---
+- page: Sales Operations
+  name: Fct - Fulfillment - Delivery Appointments
+  element_id: GycD4hWjnq
+  source:
+    kind: sql
+    from: core.ops.fct_delivery_appointments
+    sql: |-
+      SELECT
+                  id AS `Appointment ID`,
+                  carry_over_c AS `Carry Over`,
+                  order_c AS `Order`,
+                  appointment_status_c AS `Appointment Status`,
+                  order_value_c AS `Order Value`,
+                  outstanding_revenue_c AS `Outstanding Revenue`,
+                  sub_type_c AS `Sub Type`,
+                  scheduled_start_c AS `Scheduled Start`,
+                  date AS `Date`,
+                  total_expected_revenue_c AS `Total Expected Revenue`,
+                  store_name_c AS `Store Name`,
+                  final_product_c AS `Final Product`,
+                  scheduled_revenue AS `Scheduled Revenue`,
+                  remaining_scheduled AS `Scheduled Remaining`,
+                  needed_for_order AS `Needed for Order`
+              FROM core.ops.fct_delivery_appointments
+  columns:
+  - name: Appointment ID
+  - name: Carry Over
+  - name: Order
+  - name: Appointment Status
+  - name: Order Value
+  - name: Outstanding Revenue
+  - name: Sub Type
+  - name: Scheduled Start
+  - name: Date
+  - name: Total Expected Revenue
+  - name: Store Name
+  - name: Final Product
+  - name: Scheduled Revenue
+  - name: Scheduled Remaining
+  - name: Needed for Order
+# --- SQL element with id-remapped columns (raw col -> friendly name) ---
+- page: Sales Operations
+  name: Obj - Order - Order Complete Date
+  element_id: 2zrHB8Cdpu
+  source:
+    kind: sql
+    from: bronze.crm_ft.order_c
+    sql: |-
+      SELECT
+          region_c,
+          order_complete_date_c,
+          order_value_c,
+          order_status_c,
+          name
+      FROM bronze.crm_ft.order_c
+  columns:
+  - name: Store
+    id: region_c
+  - name: Order Complete Date
+    id: order_complete_date_c
+  - name: Order Value
+    id: order_value_c
+  - name: Order Status
+    id: order_status_c
+  - name: 'Order #'
+    id: name
+# --- warehouse-table element: note inode-prefixed column ids ---
+- page: Sales Operations
+  name: Obj - Targets
+  element_id: qc8AKh9k4e
+  source:
+    kind: warehouse-table
+    path: gold.core.fct_operations_targets
+  columns:
+  - name: Store
+    id: inode-HNDkzKN3Mli3zPPefdhRK/store
+  - name: Target Date
+    id: inode-HNDkzKN3Mli3zPPefdhRK/target_date
+  - name: Issued Leads Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/issued_leads_daily_goal
+  - name: Net Sales Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/net_sales_daily_goal
+  - name: Gross Sales Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/gross_sales_daily_goal
+  - name: Fulfilled Revenue Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/fulfilled_revenue_daily_goal
+  - name: NSLI Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/nsli_daily_goal
+  - name: Fulfillment Revenue Daily Goal
+    id: inode-HNDkzKN3Mli3zPPefdhRK/fulfillment_revenue_target_adjusted
+# --- SQL element with no warehouse source (inline literal) ---
+- page: Util
+  name: Util - Core Values
+  element_id: gtxHAFFHPw
+  source:
+    kind: sql
+    from: (see sql)
+    sql: |-
+      SELECT
+        CASE mod(datediff(current_date(), to_date('2026-01-01')), 4)
+          WHEN 0 THEN 'PUT THE CUSTOMER FIRST'
+          WHEN 1 THEN 'OWN THE OUTCOME'
+          WHEN 2 THEN 'KEEP IT SIMPLE'
+          WHEN 3 THEN 'GET BETTER EVERY DAY'
+        END AS core_value
+  columns:
+  - name: core_value
+relationships:
+- from: Store/Date
+  to: Fct - Fulfillment - Delivery Appointments
+  keys:
+  - from: Store
+    to: Store Name
+  - from: Date
+    to: Date
+- from: Store/Date
+  to: Obj - Order - Order Complete Date
+  keys:
+  - from: Store
+    to: Store
+  - from: Date
+    to: Order Complete Date
+- from: Store/Date
+  to: Obj - Targets
+  keys:
+  - from: Store
+    to: Store
+  - from: Date
+    to: Target Date
+metrics:
+- table: Fct - Fulfillment - Delivery Appointments
+  name: Expected Revenue
+  formula: Sum([Total Expected Revenue])
+  format: $,.0f
+- table: Fct - Fulfillment - Delivery Appointments
+  name: Scheduled Remaining
+  formula: Sum([Scheduled Remaining])
+  format: $,.0f
+- table: Obj - Order - Order Complete Date
+  name: Fulfilled Revenue
+  formula: Sum([Order Value])
+  format: $,.0f
+- table: Obj - Targets
+  name: Fulfillment Target
+  formula: Sum([Fulfilled Revenue Daily Goal])
+  format: $,.0f
+- table: Obj - Targets
+  name: Scheduling Adjusted Target
+  formula: Sum([Fulfillment Revenue Daily Goal])
+  format: $,.0f
