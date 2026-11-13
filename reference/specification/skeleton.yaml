@@ -1,0 +1,107 @@
+# Sigma workbook minimal structural skeleton.
+# Shows the *shape* of a valid spec — copy and replace IDs, columns, and elements per use case.
+# Demonstrates: top-level fields, source table from a data model, one chart child, one KPI, one filter, layout block at top level.
+# Style block on every chart/KPI/container matches the user's default (see styling.md).
+
+name: Replace Me Workbook Name
+schemaVersion: 1
+folderId: <FOLDER_ID>             # destination folder — defaults to $SIGMA_FOLDER_ID
+pages:
+  - id: page1
+    name: Page 1
+    elements:
+      # Source table (parent for all child elements). Use data-model source whenever possible — see sources.md.
+      - id: sourceTable
+        kind: table
+        name: <DATA_MODEL_NAME>    # this name becomes the column-reference prefix: [<DATA_MODEL_NAME>/Column Name]
+        source:
+          dataModelId: <DATA_MODEL_ID>
+          elementId: <DATA_MODEL_TABLE_ELEMENT_ID>
+          kind: data-model
+        columns:
+          # List only the columns child elements reference. Custom IDs (t_*) make children easier to read.
+          - id: t_dim
+            formula: '[<DATA_MODEL_NAME>/Some Dimension]'
+          - id: t_date
+            formula: '[<DATA_MODEL_NAME>/Date]'
+
+      # Filter control (list filter on a dimension).
+      - kind: control
+        controlId: filter-dim
+        id: filterDim
+        name: Some Dimension
+        filters:
+          - source:
+              kind: table
+              elementId: sourceTable
+            columnId: t_dim
+        controlType: list
+        mode: include
+        selectionMode: multiple
+        values: []
+        source:
+          kind: source
+          source:
+            kind: table
+            elementId: sourceTable
+          columnId: t_dim
+
+      # KPI sourced from the parent table. Metrics use [Metrics/<Name>] — pre-aggregated, do NOT wrap in Sum().
+      # Include the date column so the user can add a sparkline in the UI (see ui-only-features.md).
+      - id: kpiOne
+        kind: kpi-chart
+        source:
+          elementId: sourceTable
+          kind: table
+        columns:
+          - id: kpi_val
+            formula: '[Metrics/<Metric Name>]'
+          - id: kpi_date
+            formula: '[<DATA_MODEL_NAME>/Date]'
+        value:
+          id: kpi_val
+        name: KPI One
+        style:
+          borderRadius: pill
+          borderColor: '#D4D4D4'
+          borderWidth: 1
+
+      # Bar chart with color scale on a duplicate metric column (color must NOT reuse the yAxis column id).
+      - id: barOne
+        kind: bar-chart
+        source:
+          elementId: sourceTable
+          kind: table
+        columns:
+          - id: bar_dim
+            formula: '[<DATA_MODEL_NAME>/Some Dimension]'
+          - id: bar_metric
+            formula: '[Metrics/<Metric Name>]'
+          - id: bar_color
+            formula: '[Metrics/<Metric Name>]'    # duplicate of yAxis metric, dedicated to color scale
+        xAxis:
+          id: bar_dim
+          sort:
+            by: bar_metric
+            direction: ascending
+        yAxis:
+          - id: bar_metric
+        color:
+          by: scale
+          column: bar_color
+        name: Bar One
+        style:
+          borderRadius: pill
+          borderColor: '#D4D4D4'
+          borderWidth: 1
+
+# Layout lives at TOP LEVEL of the spec (not under each page). One <Page id="..."> per page in the spec.
+# 24-column grid. gridColumn / gridRow values are inclusive-start, exclusive-end (1 / 25 = full width).
+layout: |
+  <?xml version="1.0" encoding="utf-8"?>
+  <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="page1">
+    <LayoutElement elementId="filterDim" gridColumn="1 / 9" gridRow="1 / 5"/>
+    <LayoutElement elementId="kpiOne" gridColumn="1 / 13" gridRow="5 / 11"/>
+    <LayoutElement elementId="barOne" gridColumn="13 / 25" gridRow="5 / 11"/>
+    <LayoutElement elementId="sourceTable" gridColumn="1 / 25" gridRow="11 / 25"/>
+  </Page>
