@@ -1,0 +1,292 @@
+# Reference spec — a write-back data app with RLS, an AI agent, and approvals.
+#
+# Deliberately minimal but COMPLETE: every shape here round-tripped on a live org.
+# Substitute <connectionId> and your own source. Element ids are external — the API
+# remaps them on CREATE, so GET the spec back before any follow-up PUT.
+#
+# Reading order: base data -> personas -> scope -> input table -> view -> approvals -> agent.
+
+name: Example Planning App
+folderId: <folderId>
+schemaVersion: <copy from a GET-back, do not hardcode>
+
+pages:
+
+  # ── Data page: everything the app derives from. Not user-facing. ──────────
+  - id: data-pg
+    name: Data
+    elements:
+
+      # 1. The grain. One row per thing-to-plan per period.
+      - id: base
+        kind: table
+        name: Plan Base
+        source:
+          kind: sql
+          connectionId: <connectionId>
+          statement: |
+            SELECT
+              '2026 Plan'                                   AS scenario,
+              c.customer,
+              c.region,
+              p.product,
+              m.plan_month,
+              c.owner_email,
+              c.approver_email,
+              CASE WHEN m.plan_month < date_trunc('month', current_date())
+                   THEN 'Yes' ELSE 'No' END                 AS month_closed,
+              COALESCE(a.actual_amount, 0)                  AS actual_this_month,
+              COALESCE(py.actual_amount, 0)                 AS py_actual_same_month
+            FROM customers c
+            CROSS JOIN products p
+            CROSS JOIN (SELECT explode(sequence(to_date('2026-01-01'),
+                                                to_date('2026-12-01'),
+                                                interval 1 month)) AS plan_month) m
+            LEFT JOIN actuals  a  ON …
+            LEFT JOIN actuals  py ON …
+        columns:
+          # custom-SQL output columns are referenced as [Custom SQL/<col>]
+          - { id: b-scen,   name: scenario,             formula: '[Custom SQL/scenario]' }
+          - { id: b-cust,   name: customer,             formula: '[Custom SQL/customer]' }
+          - { id: b-region, name: region,               formula: '[Custom SQL/region]' }
+          - { id: b-prod,   name: product,              formula: '[Custom SQL/product]' }
+          - { id: b-month,  name: plan_month,           formula: '[Custom SQL/plan_month]' }
+          - { id: b-owner,  name: owner_email,          formula: '[Custom SQL/owner_email]' }
+          - { id: b-appr,   name: approver_email,       formula: '[Custom SQL/approver_email]' }
+          - { id: b-closed, name: month_closed,         formula: '[Custom SQL/month_closed]' }
+          - { id: b-act,    name: actual_this_month,    formula: '[Custom SQL/actual_this_month]' }
+          - { id: b-py,     name: py_actual_same_month, formula: '[Custom SQL/py_actual_same_month]' }
+
+      # 2. Who can be impersonated. An input table here lets the customer edit it.
+      - id: personas
+        kind: table
+        name: Personas
+        source:
+          kind: sql
+          connectionId: <connectionId>
+          statement: |
+            SELECT * FROM (VALUES
+              ('rep@example.com',   'Dana Reyes — Owner',    'No'),
+              ('lead@example.com',  'Sam Okafor — Approver', 'No'),
+              ('admin@example.com', 'Admin — sees all',      'Yes')
+            ) AS t(email, display_name, is_admin)
+        columns:
+          - { id: pe-email, name: email,        formula: '[Custom SQL/email]' }
+          - { id: pe-name,  name: display_name, formula: '[Custom SQL/display_name]' }
+          - { id: pe-admin, name: is_admin,     formula: '[Custom SQL/is_admin]' }
+
+      # 3. Scope table — exists so the INPUT TABLE has something filterable to
+      #    Lookup into. It must NOT reference the input table (that is a cycle),
+      #    and keeps the input table's formulas readable. (Since 2026-10 a linked input
+      #    table CAN reference its link source directly — [Plan Base/col] compiles as a
+      #    per-key lookup — but a scope table is still the clearer RLS pattern.)
+      - id: myscope
+        kind: table
+        name: My Scope
+        source: { kind: table, elementId: base }
+        columns:
+          - { id: ms-cust,  name: Customer,   formula: '[Plan Base/customer]' }
+          - { id: ms-viewas, name: Viewing As, formula: '[ViewAs]' }
+          - { id: ms-email, name: Viewing As Email,
+              formula: 'Lookup(Max([Personas/email]), [Viewing As], [Personas/display_name])' }
+          - id: ms-mine
+            name: Mine
+            formula: >-
+              If([Plan Base/owner_email] = [Viewing As Email]
+                 or [Plan Base/approver_email] = [Viewing As Email], "Yes", "No")
+
+      # 4. Row Context — the values the input table wants to show but cannot
+      #    reach through its own link. Same keys, no back-reference.
+      - id: rowctx
+        kind: table
+        name: Row Context
+        source: { kind: table, elementId: base }
+        columns:
+          - { id: rc-cust,   name: Customer,     formula: '[Plan Base/customer]' }
+          - { id: rc-prod,   name: Product,      formula: '[Plan Base/product]' }
+          - { id: rc-month,  name: Plan Month,   formula: '[Plan Base/plan_month]' }
+          - { id: rc-closed, name: Month Closed, formula: '[Plan Base/month_closed]' }
+          - { id: rc-py,     name: PY Actual $,  formula: '[Plan Base/py_actual_same_month]' }
+          - { id: rc-owner,  name: Owner,        formula: '[Plan Base/owner_email]' }
+
+      # 5. Append-only write tables. CREATED_AT/BY are free audit columns.
+      - id: subs
+        kind: input-table
+        name: Submissions
+        source: { kind: empty, connectionId: <connectionId> }
+        columns:
+          - { id: sb-cust, type: text, name: Customer }
+          - { id: sb-by,   type: text, name: Submitted By }
+          - { id: CREATED_AT }
+          - { id: CREATED_BY }
+
+      - id: aplog
+        kind: input-table
+        name: Approval Log
+        source: { kind: empty, connectionId: <connectionId> }
+        columns:
+          - { id: al-cust,     type: text, name: Customer }
+          - { id: al-approver, type: text, name: Approver }
+          - { id: al-decision, type: text, name: Decision, values: [Approved, Changes requested] }
+          - { id: CREATED_AT }
+          - { id: CREATED_BY }
+
+  # ── The working page ──────────────────────────────────────────────────────
+  - id: work-pg
+    name: Enter my plan
+    elements:
+
+      - kind: control
+        id: ctrl-viewas
+        controlId: ViewAs
+        name: View as
+        controlType: list
+        mode: include
+        selectionMode: single
+        value: 'Dana Reyes — Owner'          # never "" — that filters everything out
+        source:
+          kind: source
+          source: { kind: table, elementId: personas }
+          columnId: pe-name
+
+      # Carrier controls for the agent. Prefixed so a reader knows what drives them.
+      - { kind: control, id: bk-cust, controlId: BulkCustomer, name: 'AI · customer',
+          controlType: text,   mode: equals, case: insensitive, showOperators: false,
+          includeNulls: when-no-value-is-selected }
+      - { kind: control, id: bk-mode, controlId: BulkMode, name: 'AI · mode',
+          controlType: text,   mode: equals, case: insensitive, showOperators: false,
+          includeNulls: when-no-value-is-selected }
+      - { kind: control, id: bk-pct,  controlId: BulkPct,  name: 'AI · growth %',
+          controlType: number, mode: '=',    includeNulls: when-no-value-is-selected }
+      - { kind: control, id: bk-amt,  controlId: BulkAmt,  name: 'AI · amount',
+          controlType: number, mode: '=',    includeNulls: when-no-value-is-selected }
+
+      # THE EDITABLE GRID.
+      #  - `linked` gives one input row per base row, keyed.
+      #  - Formula columns DO bind here, and (since 2026-10) can reference `base` too.
+      #  - Column order is NOT settable: on save, every storage column is placed before
+      #    every formula column, whatever order you send.
+      #  - conditionalFormats work here (since 2026-10) with the {type: single, ...} shape.
+      - id: grid
+        kind: input-table
+        name: Plan Grid
+        inputMode: edit
+        source: { kind: linked, from: base }
+        columns:
+          - { id: g-cust,  key: b-cust }
+          - { id: g-prod,  key: b-prod }
+          - { id: g-month, key: b-month }
+
+          - { id: g-amt,   type: number, name: Plan $ }
+          - { id: g-notes, type: text,   name: Notes }
+
+          # context, via Row Context (the link source also works since 2026-10)
+          - { id: g-closed, name: Month Closed,
+              formula: 'Lookup(Max([Row Context/Month Closed]), [Customer], [Row Context/Customer], [Product], [Row Context/Product], [Plan Month], [Row Context/Plan Month])' }
+          - { id: g-py, name: PY Actual $, format: { kind: number, formatString: '$,.0f' },
+              formula: 'Lookup(Max([Row Context/PY Actual $]), [Customer], [Row Context/Customer], [Product], [Row Context/Product], [Plan Month], [Row Context/Plan Month])' }
+
+          # row-level security
+          - { id: g-admin, name: Is Admin,
+              formula: 'Lookup(Max([Personas/is_admin]), [ViewAs], [Personas/display_name])' }
+          - id: g-vis
+            name: Visible To Me
+            formula: >-
+              If([Is Admin] = "Yes", "Yes",
+                 If(Lookup(Max([My Scope/Mine]), [Customer], [My Scope/Customer]) = "Yes",
+                    "Yes", "No"))
+          # lock signal (a flag, not real enforcement — see approval-workflow.md)
+          - id: g-sub
+            name: Submitted
+            formula: >-
+              If(IsNull(Lookup(Max([Submissions/Created at]), [Customer], [Submissions/Customer])),
+                 "No", "Yes")
+          - { id: UPDATED_AT }
+          - { id: UPDATED_BY }
+        filters:
+          - { id: g-fv, columnId: g-vis, kind: list, mode: include, values: ['Yes'] }
+
+      - { id: chat, kind: chat, agentId: agent-1 }
+
+# ── Agent: one tool, mode-switched. agent-input cannot reach whichRows, so
+#    every argument lands in a carrier control first. ────────────────────────
+agents:
+  - id: agent-1
+    name: Planning Agent
+    instructions: |
+      You help owners build their plan and approvers review it.
+
+      ## Your Tools
+      * **database_execute_query**: Query [Plan Grid](agent-element://grid) to answer questions.
+      * [Update plan rows](agent-tool://update-plan-rows) : the one tool for changing numbers.
+        `mode` picks the rule — `pct_of_py` grows prior-year actuals, `amount` sets a flat figure.
+        Customer matching is partial and case-insensitive.
+
+      ## How to Respond
+      * One call rewrites every matching row — never edit row by row.
+      * Closed, locked and not-yours rows are skipped. Say so if fewer rows changed than expected.
+      * After an edit, state the customer, the months, the rule, and the before/after totals.
+    dataSources:
+      - { kind: table, elementId: grid }
+    tools:
+      - toolId: update-plan-rows
+        kind: action
+        name: Update plan rows
+        description: >-
+          Update the plan for a customer across a month range in one call.
+          customer: any part of the name (partial, case-insensitive).
+          from_month / to_month: dates like 2026-07-01.
+          mode: 'pct_of_py' grows prior-year actuals by growth_percent (default);
+          'amount' puts a flat figure in every month, taken from amount.
+          Closed months, submitted rows and accounts the user does not own are skipped.
+        steps:
+          - { kind: effect, effect: set-control-value, control: BulkCustomer,
+              value: { type: agent-input, inputName: customer } }
+          - { kind: effect, effect: set-control-value, control: BulkMode,
+              value: { type: agent-input, inputName: mode } }
+          - { kind: effect, effect: set-control-value, control: BulkPct,
+              value: { type: agent-input, inputName: growth_percent } }
+          - { kind: effect, effect: set-control-value, control: BulkAmt,
+              value: { type: agent-input, inputName: amount } }
+          - kind: effect
+            effect: update-rows
+            table: grid
+            whichRows:
+              type: formula
+              # Contains(), not "=" — an exact match on a warehouse key finds
+              # nothing and update-rows against zero rows SUCCEEDS SILENTLY.
+              # Every guard lives here; there is no row permission model.
+              formula: >-
+                Contains(Upper([Customer]), Upper([BulkCustomer]))
+                and [Plan Month] >= Date([BulkFrom])
+                and [Plan Month] <= Date([BulkTo])
+                and [Month Closed] = "No"
+                and [Submitted] = "No"
+                and [Visible To Me] = "Yes"
+            values:
+              g-amt:
+                type: formula
+                formula: >-
+                  If([BulkMode] = "amount", [BulkAmt],
+                     Zn([PY Actual $]) * (1 + [BulkPct] / 100))
+
+# layout is a ROOT-level key. Nested under a page it is silently rewritten
+# to a vertical stack. Every element must appear exactly once.
+layout: |
+  <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="work-pg">
+    <LayoutElement elementId="ctrl-viewas" gridColumn="1 / 6"  gridRow="1 / 4"/>
+    <LayoutElement elementId="grid"        gridColumn="1 / 18" gridRow="4 / 30"/>
+    <LayoutElement elementId="chat"        gridColumn="18 / 25" gridRow="4 / 30"/>
+    <LayoutElement elementId="bk-cust"     gridColumn="1 / 7"  gridRow="30 / 32"/>
+    <LayoutElement elementId="bk-mode"     gridColumn="7 / 13" gridRow="30 / 32"/>
+    <LayoutElement elementId="bk-pct"      gridColumn="13 / 19" gridRow="30 / 32"/>
+    <LayoutElement elementId="bk-amt"      gridColumn="19 / 25" gridRow="30 / 32"/>
+  </Page>
+  <Page type="grid" gridTemplateColumns="repeat(24, 1fr)" gridTemplateRows="auto" id="data-pg">
+    <LayoutElement elementId="base"     gridColumn="1 / 25" gridRow="1 / 11"/>
+    <LayoutElement elementId="personas" gridColumn="1 / 25" gridRow="11 / 18"/>
+    <LayoutElement elementId="myscope"  gridColumn="1 / 25" gridRow="18 / 28"/>
+    <LayoutElement elementId="rowctx"   gridColumn="1 / 25" gridRow="28 / 38"/>
+    <LayoutElement elementId="subs"     gridColumn="1 / 25" gridRow="38 / 46"/>
+    <LayoutElement elementId="aplog"    gridColumn="1 / 25" gridRow="46 / 54"/>
+  </Page>
